@@ -1,0 +1,59 @@
+calmanager is a framework for managing calendar entries on a CalDAV
+server. It is released under the GNU GPLv3 or any later version.
+
+= Concepts
+
+I assume you already have a CalDAV server with multiple calendars on
+it. I like calypso. (I suppose you could use this with a CalDAV server
+that you didn't run yourself, but why would you want to trust someone
+else with your calendar?)
+
+calmanager is a framework which loads helper scripts. Each helper
+script defines a category within the calendar which it "owns". When
+the framework is run, each category will be brought up to date with
+the calendar according to the corresponding helper: outdated entries
+will be deleted and new ones will be added.
+
+= Setup
+
+You will need a configuration file config.yaml containing:
+
+---
+URL: ...the URL to the calendar server you're using
+username: your username
+password: your password
+tz: your default time zone, e.g. Europe/London
+
+and perhaps lat: and lon: entries should you be using the Eclipse
+helper.
+
+You'll also need a bunch of perl modules. They're all packaged in
+Debian/stable, which should help matters.
+
+The astronomical modules need swetest (in the Debian package
+libswe-dev).
+
+= Use
+
+./calmanager
+
+This will kick off the synchronisation process. Every manager with a
+name ending in ".pl" will be run.
+
+bankholidays.pl: loads the England and Wales bank holiday file from
+gov.uk. A decent example for other external ICS files. Note that any
+UID or category information will be stripped (the calmanager framework
+uses this to determine which entries should be removed).
+
+birthday.pl: extracts BDAY entries from vCard files in ~/.vcf/ .
+Matches "--MMDD", "YYMMDD", "YYYYMMDD" and "YYYY-MM-DD" forms.
+
+eclipse.pl: predicts lunar and solar eclipses (including whether
+they're above the horizon at your set location). Lunar eclipses that
+are only penumbral are not considered.
+
+moonphase.pl: predicts moon phases.
+
+seasons.pl: predicts solstices, equinoctes, and cross-quarter days.
+(I'm using the modern pagan names for the latter; I'm not aware of any
+other names that are more credible.)

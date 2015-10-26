@@ -1,0 +1,128 @@
+#! /usr/bin/perl
+
+use strict;
+use warnings;
+
+use YAML::XS;
+use Data::ICal;
+use HTTP::DAV;
+use Digest::SHA qw(sha256_base64);
+use File::Temp qw(tempfile);
+
+BEGIN {
+  opendir D,'.';
+  map {require $_;} sort grep /\.pl$/,readdir D;
+  closedir D;
+}
+
+my $dtz='Europe/London';
+my $y=yaml_load_file('config.yaml');
+my $calurl=$y->{URL};
+
+my $dav=HTTP::DAV->new;
+$dav->credentials(
+  -user => $y->{username},
+  -pass => $y->{password},
+  -url  => $calurl,
+    );
+
+my $hostname;
+chomp ($hostname=`hostname -f`);
+
+my %cg;
+my %cc;
+{
+  foreach my $mode (map {s/:+$//;$_} grep /::$/,keys %Calmanager::) {
+    my $cal;
+    my $cat;
+    {
+      my $obj="Calmanager::$mode";
+      no strict 'refs';
+      $cal=$obj->generate($y);
+      $cat=$obj->category;
+    }
+    $cc{$cat}=1;
+    foreach my $entry (@{$cal->entries}) {
+      delete $entry->properties->{uid};
+      delete $entry->properties->{categories};
+      $entry->add_properties(categories => $cat);
+      my $uid=join('@',sha256_base64($entry->as_string),$hostname);
+      $entry->add_properties(uid => $uid);
+      my $minical=Data::ICal->new;
+      $minical->add_entry($entry);
+      $cg{$uid}=$minical;
+    }
+  }
+}
+
+$dav->open(-url => $calurl) or die "no dav\n";
+my $k=$dav->propfind(-url => $calurl) or die "no propfind\n";
+my @urllist=$k->get_resourcelist->get_urls;
+
+foreach my $entryurl (@urllist) {
+  my $sc;
+  $dav->get(-url => $entryurl,-to => \$sc);
+  my $minical=Data::ICal->new(data => $sc);
+  my $entry=($minical->entries)->[0];
+  my %cats=map {$_ => 1} split /,/,getprop($entry,'categories');
+  my $uid=getprop($entry,'uid');
+  foreach my $c (keys %cats) {
+    if (exists $cc{$c} && exists $cg{$uid}) {
+      # we have a matching UID, AND we're in a controlled category
+      # so nothing has changed; delete the generated version
+      delete $cg{$uid};
+      last;
+    } elsif (exists $cc{$c}) {
+      # we're in a controlled category but the UID doesn't exist in the
+      # newly-generated entries. So delete the old version.
+      my $r=$dav->delete(-url => $entryurl);
+      unless ($r) {
+        die Dumper($dav->errors);
+      }
+      last;
+    }
+  }
+}
+foreach my $newuid (keys %cg) {
+  my @e;
+  foreach my $len (8,4,4,4,12) {
+    my @l;
+    foreach (1..$len) {
+      push @l,sprintf("%1x",int(rand(16)));
+    }
+    push @e,join('',@l);
+  }
+  my $etag=join('-',@e);
+  my $newurl="$calurl/$etag.ics";
+  my ($fh,$filename)=tempfile;
+  print $fh $cg{$newuid}->as_string;
+  close $fh;
+  my $r=$dav->put(-url => $newurl, -local => $filename, -headers => {'Content-Type' => 'text/calendar'});
+  unless ($r) {
+    die Dumper($filename,$dav->errors);
+  }
+  unlink $filename;
+}
+
+sub getprop {
+  my $entry=shift;
+  my $propname=shift;
+  my $ret;
+  if (defined $entry->property($propname)) {
+    my %cats;
+    foreach my $e (@{$entry->property($propname)}) {
+      $cats{$e->value}=1;
+    }
+    $ret=join(',',sort keys %cats);
+  }
+}
+
+sub yaml_load_file {
+  my $file=shift;
+  open (I,'<',$file) || die "Can't load $file\n";
+  my $data=join('',<I>);
+  close I;
+  my $r=Load($data) || die "Can't decode $file\n";
+  return $r;
+}
+
