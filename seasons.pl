@@ -3,7 +3,7 @@
 use strict;
 use warnings;
 
-package Calmanager::Seasons;
+package Calmanager::Season;
 
 use Data::ICal::DateTime;
 use Data::ICal::Entry::Event;

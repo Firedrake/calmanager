@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use utf8;
 
-package Calmanager::BankHolidays;
+package Calmanager::BankHoliday;
 
 use Data::ICal::DateTime;
 use Data::ICal::Entry::Event;
