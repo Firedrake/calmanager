@@ -57,3 +57,13 @@ moonphase.pl: predicts moon phases.
 seasons.pl: predicts solstices, equinoctes, and cross-quarter days.
 (I'm using the modern pagan names for the latter; I'm not aware of any
 other names that are more credible.)
+
+Options to calmanager:
+
+-c - specify alternate config file
+-l - list available helpers
+-d - delete entries from this helper (will not work with more than one
+     helper in a single invocation
+
+You can specify individual helpers on the command line; use -l for a
+list of names. Only those will be run.

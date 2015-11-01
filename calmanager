@@ -8,6 +8,7 @@ use Data::ICal;
 use HTTP::DAV;
 use Digest::SHA qw(sha256_base64);
 use File::Temp qw(tempfile);
+use Getopt::Std;
 
 BEGIN {
   opendir D,'.';
@@ -15,8 +16,19 @@ BEGIN {
   closedir D;
 }
 
+my %o=(c => 'config.yaml');
+getopts('ldhc:',\%o);
+
+if ($o{h}) {
+  print STDERR <<EOF;
+Usage: $0 (-c configfile) (-l) (-d) (helper) (helper...)
+-l lists helpers
+-d deletes all calendar entries associated with a helper
+EOF
+  exit 0;
+}
 my $dtz='Europe/London';
-my $y=yaml_load_file('config.yaml');
+my $y=yaml_load_file($o{c});
 my $calurl=$y->{URL};
 
 my $dav=HTTP::DAV->new;
@@ -32,25 +44,44 @@ chomp ($hostname=`hostname -f`);
 my %cg;
 my %cc;
 {
-  foreach my $mode (map {s/:+$//;$_} grep /::$/,keys %Calmanager::) {
+  my @hlist=map {s/:+$//;$_} sort grep /::$/,keys %Calmanager::;
+  if ($o{l}) {
+    print map {"$_\n"} @hlist;
+    exit 0;
+  }
+  if (@ARGV) {
+    my %a=map {$_ => 1} @ARGV;
+    @hlist=grep {exists $a{$_}} @hlist;
+  }
+  if (scalar @hlist==0) {
+    die "No helpers found of that name.\n";
+  }
+  if ($o{d} && scalar @hlist > 1) {
+    die "I won't delete more than one helper at a time.\n";
+  }
+  foreach my $mode (@hlist) {
     my $cal;
     my $cat;
     {
       my $obj="Calmanager::$mode";
       no strict 'refs';
-      $cal=$obj->generate($y);
+      unless ($o{d}) {
+        $cal=$obj->generate($y);
+      }
       $cat=$obj->category;
     }
     $cc{$cat}=1;
-    foreach my $entry (@{$cal->entries}) {
-      delete $entry->properties->{uid};
-      delete $entry->properties->{categories};
-      $entry->add_properties(categories => $cat);
-      my $uid=join('@',sha256_base64($entry->as_string),$hostname);
-      $entry->add_properties(uid => $uid);
-      my $minical=Data::ICal->new;
-      $minical->add_entry($entry);
-      $cg{$uid}=$minical;
+    unless ($o{d}) {
+      foreach my $entry (@{$cal->entries}) {
+        delete $entry->properties->{uid};
+        delete $entry->properties->{categories};
+        $entry->add_properties(categories => $cat);
+        my $uid=join('@',sha256_base64($entry->as_string),$hostname);
+        $entry->add_properties(uid => $uid);
+        my $minical=Data::ICal->new;
+        $minical->add_entry($entry);
+        $cg{$uid}=$minical;
+      }
     }
   }
 }
