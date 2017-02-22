@@ -9,10 +9,11 @@ use HTTP::DAV;
 use Digest::SHA qw(sha256_base64);
 use File::Temp qw(tempfile);
 use Getopt::Std;
+use Encode;
 
 BEGIN {
   opendir D,'.';
-  map {require $_;} sort grep /\.pl$/,readdir D;
+  map {require "./$_";} sort grep /\.pl$/,readdir D;
   closedir D;
 }
 
@@ -76,7 +77,7 @@ my %cc;
         delete $entry->properties->{uid};
         delete $entry->properties->{categories};
         $entry->add_properties(categories => $cat);
-        my $uid=join('@',sha256_base64($entry->as_string),$hostname);
+        my $uid=join('@',sha256_base64(encode('UTF-8',$entry->as_string)),$hostname);
         $entry->add_properties(uid => $uid);
         my $minical=Data::ICal->new;
         $minical->add_entry($entry);
@@ -130,6 +131,7 @@ foreach my $newuid (keys %cg) {
   close $fh;
   my $r=$dav->put(-url => $newurl, -local => $filename, -headers => {'Content-Type' => 'text/calendar'});
   unless ($r) {
+    use Data::Dumper;
     die Dumper($filename,$dav->errors);
   }
   unlink $filename;
