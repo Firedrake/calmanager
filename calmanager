@@ -3,13 +3,14 @@
 use strict;
 use warnings;
 
-use YAML::XS;
+use YAML::XS qw(LoadFile);
 use Data::ICal;
-use HTTP::DAV;
 use Digest::SHA qw(sha256_base64);
-use File::Temp qw(tempfile);
 use Getopt::Std;
 use Encode;
+use LWP::UserAgent;
+use XML::LibXML;
+use XML::LibXML::XPathContext;
 
 BEGIN {
   opendir D,'.';
@@ -18,26 +19,21 @@ BEGIN {
 }
 
 my %o=(c => 'config.yaml');
-getopts('ldhc:',\%o);
+getopts('ldhc:v',\%o);
 
 if ($o{h}) {
   print STDERR <<EOF;
 Usage: $0 (-c configfile) (-l) (-d) (helper) (helper...)
 -l lists helpers
 -d deletes all calendar entries associated with a helper
+-c verbose
 EOF
   exit 0;
 }
 my $dtz='Europe/London';
-my $y=yaml_load_file($o{c});
-my $calurl=$y->{URL};
-
-my $dav=HTTP::DAV->new;
-$dav->credentials(
-  -user => $y->{username},
-  -pass => $y->{password},
-  -url  => $calurl,
-    );
+my $y=LoadFile($o{c});
+(my $phost=$y->{URL}) =~ s/([-a-z0-9])\/[-a-z0-9].*/$1/i;
+my $ua=LWP::UserAgent->new;
 
 my $hostname;
 chomp ($hostname=`hostname -f`);
@@ -75,7 +71,7 @@ my %cc;
     unless ($o{d}) {
       foreach my $entry (@{$cal->entries}) {
         delete $entry->properties->{uid};
-        delete $entry->properties->{categories};
+#        delete $entry->properties->{categories};
         $entry->add_properties(categories => $cat);
         my $uid=join('@',sha256_base64(encode('UTF-8',$entry->as_string)),$hostname);
         $entry->add_properties(uid => $uid);
@@ -87,34 +83,82 @@ my %cc;
   }
 }
 
-$dav->open(-url => $calurl) or die "no dav\n";
-my $k=$dav->propfind(-url => $calurl) or die "no propfind\n";
-my @urllist=$k->get_resourcelist->get_urls;
+my %p=(user => $y->{username},
+       pass => $y->{password},
+       url => $y->{URL});
+my $req=HTTP::Request->new(REPORT => $p{url});
+if (exists $p{user} && exists $p{pass}) {
+  $req->authorization_basic($p{user},$p{pass});
+}
+$req->header('Content-Type','application/xml; charset=utf-8');
+$req->header('Prefer','Return-minimal');
+$req->header('Depth','1');
+{
+  my $doc=XML::LibXML::Document->new("1.0","UTF-8");
+  my $xml=$doc->createElement('c:calendar-query');
+  $doc->setDocumentElement($xml);
+  $xml->setAttribute('xmlns:d' => 'DAV:');
+  $xml->setAttribute('xmlns:c' => 'urn:ietf:params:xml:ns:caldav');
+  {
+    my $prop=XML::LibXML::Element->new('d:prop');
+    $prop->addChild(XML::LibXML::Element->new('d:getetag'));
+    $prop->addChild(XML::LibXML::Element->new('c:calendar-data'));
+    $xml->addChild($prop);
+  }
+  {
+    my $filter=XML::LibXML::Element->new('c:filter');
+    my $e=XML::LibXML::Element->new('c:comp-filter');
+    $e->setAttribute(name => 'VCALENDAR');
+    $filter->addChild($e);
+    $xml->addChild($filter);
+  }
+  $req->content($doc->toString);
+}
+my $res=$ua->request($req);
 
-foreach my $entryurl (@urllist) {
-  my $sc;
-  $dav->get(-url => $entryurl,-to => \$sc);
-  my $minical=Data::ICal->new(data => $sc);
-  my $entry=($minical->entries)->[0];
-  my %cats=map {$_ => 1} split /,/,getprop($entry,'categories');
-  my $uid=getprop($entry,'uid');
-  foreach my $c (keys %cats) {
-    if (exists $cc{$c} && exists $cg{$uid}) {
-      # we have a matching UID, AND we're in a controlled category
-      # so nothing has changed; delete the generated version
-      delete $cg{$uid};
-      last;
-    } elsif (exists $cc{$c}) {
-      # we're in a controlled category but the UID doesn't exist in the
-      # newly-generated entries. So delete the old version.
-      my $r=$dav->delete(-url => $entryurl);
-      unless ($r) {
-        die Dumper($dav->errors);
+unless ($res->is_success) {
+  die $p{url}."\n".$res->status_line."\n";
+}
+
+my $doc=XML::LibXML->load_xml(string => $res->content);
+my $xpc=XML::LibXML::XPathContext->new($doc);
+$xpc->registerNs('c','urn:ietf:params:xml:ns:caldav');
+$xpc->registerNs('d','DAV:');
+foreach my $n ($xpc->findnodes('//c:calendar-data')) {
+  my $c=Data::ICal->new(data => $n->textContent);
+  foreach my $entry ($c->events) {
+    my %cats=map {$_ => 1} split /,/,getprop($entry,'categories');
+    my $uid=getprop($entry,'uid');
+    foreach my $c (keys %cats) {
+      if (exists $cc{$c} && exists $cg{$uid}) {
+        # we have a matching UID, AND we're in a controlled category
+        # so nothing has changed; delete the generated version
+        if ($o{v}) {
+          warn "deleting new $uid from $c\n";
+        }
+        delete $cg{$uid};
+        last;
+      } elsif (exists $cc{$c}) {
+        # we're in a controlled category but the UID doesn't exist in the
+        # newly-generated entries. So delete the old version.
+        my @href=$xpc->findnodes('../../../d:href',$n);
+        my $uri=$href[0]->textContent;
+        if ($uri =~ /^\/[-a-z0-9]/i) {
+          $uri=$phost.$uri;
+        }
+        my @etag=$xpc->findnodes('../d:getetag',$n);
+        my $etag=$etag[0]->textContent;
+        my $req2=HTTP::Request->new(DELETE => $uri);
+        if (exists $p{user} && exists $p{pass}) {
+          $req2->authorization_basic($p{user},$p{pass});
+        }
+        $req2->header('If-Match',$etag);
+        my $res2=$ua->request($req2);
       }
-      last;
     }
   }
 }
+
 foreach my $newuid (keys %cg) {
   my @e;
   foreach my $len (8,4,4,4,12) {
@@ -125,16 +169,14 @@ foreach my $newuid (keys %cg) {
     push @e,join('',@l);
   }
   my $etag=join('-',@e);
-  my $newurl="$calurl/$etag.ics";
-  my ($fh,$filename)=tempfile;
-  print $fh $cg{$newuid}->as_string;
-  close $fh;
-  my $r=$dav->put(-url => $newurl, -local => $filename, -headers => {'Content-Type' => 'text/calendar'});
-  unless ($r) {
-    use Data::Dumper;
-    die Dumper($filename,$dav->errors);
+  my $newurl="$y->{URL}/$etag.ics";
+  my $req2=HTTP::Request->new(PUT => $newurl);
+  if (exists $p{user} && exists $p{pass}) {
+    $req2->authorization_basic($p{user},$p{pass});
   }
-  unlink $filename;
+  $req2->header('Content-Type','text/calendar; charset=utf-8');
+  $req2->content($cg{$newuid}->as_string);
+  my $res2=$ua->request($req2);
 }
 
 sub getprop {
@@ -149,13 +191,3 @@ sub getprop {
     $ret=join(',',sort keys %cats);
   }
 }
-
-sub yaml_load_file {
-  my $file=shift;
-  open (I,'<',$file) || die "Can't load $file\n";
-  my $data=join('',<I>);
-  close I;
-  my $r=Load($data) || die "Can't decode $file\n";
-  return $r;
-}
-
