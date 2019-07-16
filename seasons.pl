@@ -2,11 +2,14 @@
 
 use strict;
 use warnings;
-
-package Calmanager::Season;
-
+use Astro::Coord::ECI;
+use Astro::Coord::ECI::Sun;
+use Astro::Coord::ECI::Utils qw{deg2rad rad2deg};
 use Data::ICal::DateTime;
 use Data::ICal::Entry::Event;
+use Date::ICal;
+
+package Calmanager::Season;
 
 sub category {
   return 'Seasons';
@@ -16,6 +19,12 @@ sub generate {
   shift;
   my $y=shift;
   my $cal=Data::ICal->new;
+  my %lookup=(
+    'Spring equinox' => 0,
+    'Summer solstice' => 2,
+    'Fall equinox' => 4,
+    'Winter solstice' => 6,
+      );
   my @name=(
     'Northward Equinox',
     'Beltane',
@@ -26,64 +35,55 @@ sub generate {
     'Southern Solstice',
     'Imbolc',
       );
-  my @start=(DateTime->now,-1);
-  $start[0]->set_time_zone($y->{tz});
-  my @end=($start[0]+DateTime::Duration->new(seconds => 3974400),-1);
-  $end[0]->set_time_zone('Europe/London');
-  $start[1]=getlon($start[0]);
-  my $tn=int($start[1]/45)+1;
-  foreach my $tt ($tn..7,(0..7)x0,0..$tn-1) {
-    my $target=45*$tt;
-    my $dur=$end[0]->subtract_datetime_absolute($start[0]);
-    $end[1]=getlon($end[0]);
-    my @n;
-    while ($dur->in_units('seconds')>0.5) {
-      $dur->multiply(0.5);
-      @n=($start[0]->clone->add($dur),-1);
-      $n[1]=getlon($n[0]);
-      if (angledelta($end[1],$target) > angledelta($target,$start[1])) {
-        @end=@n;
-      } else {
-        @start=@n;
+  my $tmin=time;
+  my $tbase=$tmin-35*86400;
+  my $tmax=$tmin+365.25*86400;
+  my $sun = Astro::Coord::ECI::Sun->new;
+  $sun->universal($tbase);
+  my $prev=0;
+  while (1) {
+    my ($tq,$quarter,$desc)=$sun->next_quarter;
+    if ($prev) {
+      my $start=($prev+$tq)/2;
+      my $target=($quarter*2-1)*45;
+      while ($target<0) {
+        $target+=360;
       }
-    }
-    $n[0]->set_time_zone($y->{tz});
+      $target=::deg2rad($target);
+      my $step=10000;
+      my $sign=0;
+      while ($step > 0.001) {
+        $start+=$step*$sign;
+        $sun->universal($start);
+        my $gl=$sun->geometric_longitude;
+        if ($sign) {
+          if (($gl-$target)*$sign>0) {
+            $start-=$step*$sign;
+            $step/=2;
+            $sign=0;
+          }
+        } else {
+          $sign=($gl>$target)?-1:1;
+        }
+      }
     my $ev=Data::ICal::Entry::Event->new;
-    $ev->add_properties(summary => $name[$tt],
-                        dtstart => $n[0]->format_cldr('yyyyMMdd').'T'.$n[0]->format_cldr('HHmmss'));
+    $ev->add_properties(summary => $name[2*$quarter-1],
+                        duration => 'PT1S');
+    $ev->start(DateTime->from_epoch(epoch => $start-1));
     $cal->add_entry($ev);
-    $start[0]=$n[0]+DateTime::Duration->new(seconds => 3456000);
-    $start[0]->set_time_zone('Europe/London');
-    $end[0]=$start[0]+DateTime::Duration->new(seconds => 864000);
-    $end[0]->set_time_zone('Europe/London');
-    $start[1]=getlon($start[0]);
+      $sun->universal($tq);
+    }
+    $prev=$tq;
+    my $ev=Data::ICal::Entry::Event->new;
+    $ev->add_properties(summary => $name[2*$quarter],
+                        duration => 'PT1S');
+    $ev->start(DateTime->from_epoch(epoch => $tq-1));
+    $cal->add_entry($ev);
+    if ($tq > $tmax) {
+      last;
+    }
   }
   return $cal;
-}
-
-sub dt2swe {
-  my $dt=shift;
-  $dt->set_time_zone('GMT');
-  my @o;
-  push @o,'-b'.$dt->format_cldr('d.M.yyyy');
-  push @o,'-ut'.$dt->format_cldr('HH:mm:ss');
-  return @o;
-}
-
-sub getlon {
-  my $dt=shift;
-  open I,'-|',qw(swetest -p0 -fl -head),dt2swe($dt);
-  chomp (my $r=<I>);
-  close I;
-  return 0+$r;
-}
-
-sub angledelta {
-  my ($end,$start)=@_;
-  if ($end < $start) {
-    $end+=360;
-  }
-  return $end-$start;
 }
 
 1;
